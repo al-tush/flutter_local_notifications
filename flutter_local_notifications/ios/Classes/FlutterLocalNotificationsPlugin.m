@@ -10,6 +10,13 @@
   NSObject<FlutterPluginRegistrar> *_registrar;
   FlutterEngineManager *_flutterEngineManager;
   NSMutableDictionary *_launchNotificationResponseDict;
+
+  __weak id<UNUserNotificationCenterDelegate> _originalNotificationCenterDelegate;
+  struct {
+    unsigned int willPresentNotification : 1;
+    unsigned int didReceiveNotificationResponse : 1;
+    unsigned int openSettingsForNotification : 1;
+  } _originalNotificationCenterDelegateRespondsTo;
 }
 
 static FlutterPluginRegistrantCallback registerPlugins;
@@ -378,6 +385,22 @@ static FlutterError *getFlutterError(NSError *error) {
 
 - (void)initialize:(NSDictionary *_Nonnull)arguments
             result:(FlutterResult _Nonnull)result {
+    UNUserNotificationCenter *notificationCenter = [UNUserNotificationCenter currentNotificationCenter];
+    _originalNotificationCenterDelegate = notificationCenter.delegate;
+    _originalNotificationCenterDelegateRespondsTo.openSettingsForNotification =
+        (unsigned int)[_originalNotificationCenterDelegate
+            respondsToSelector:@selector(userNotificationCenter:openSettingsForNotification:)];
+    _originalNotificationCenterDelegateRespondsTo.willPresentNotification =
+        (unsigned int)[_originalNotificationCenterDelegate
+            respondsToSelector:@selector(userNotificationCenter:
+                                        willPresentNotification:withCompletionHandler:)];
+    _originalNotificationCenterDelegateRespondsTo.didReceiveNotificationResponse =
+        (unsigned int)[_originalNotificationCenterDelegate
+            respondsToSelector:@selector(userNotificationCenter:
+                                   didReceiveNotificationResponse:withCompletionHandler:)];
+  
+    notificationCenter.delegate = self;
+    
   bool requestedSoundPermission = false;
   bool requestedAlertPermission = false;
   bool requestedBadgePermission = false;
@@ -1100,6 +1123,12 @@ static FlutterError *getFlutterError(NSError *error) {
     NS_AVAILABLE_IOS(10.0) {
   if (![self
           isAFlutterLocalNotification:notification.request.content.userInfo]) {
+      // Forward on to any other delegates amd allow them to control presentation behavior.
+      if (_originalNotificationCenterDelegate != nil) {
+        [_originalNotificationCenterDelegate userNotificationCenter:center
+                                            willPresentNotification:notification
+                                              withCompletionHandler:completionHandler];
+      }
     return;
   }
   UNNotificationPresentationOptions presentationOptions = 0;
@@ -1170,12 +1199,31 @@ static FlutterError *getFlutterError(NSError *error) {
 }
 
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
-    didReceiveNotificationResponse:(UNNotificationResponse *)response
-             withCompletionHandler:(void (^)(void))completionHandler
+    openSettingsForNotification:(nullable UNNotification *)notification
+NS_AVAILABLE_IOS(10.0) {
+  // Forward on to any other delegates.
+  if (_originalNotificationCenterDelegate != nil &&
+      _originalNotificationCenterDelegateRespondsTo.openSettingsForNotification) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+    [_originalNotificationCenterDelegate userNotificationCenter:center
+                                    openSettingsForNotification:notification];
+#pragma clang diagnostic pop
+  }
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+        didReceiveNotificationResponse:(UNNotificationResponse *)response
+        withCompletionHandler:(void (^)(void))completionHandler
     NS_AVAILABLE_IOS(10.0) {
   if (![self isAFlutterLocalNotification:response.notification.request.content
-                                             .userInfo]) {
-    return;
+        .userInfo]) {
+            if (_originalNotificationCenterDelegate != nil) {
+                [_originalNotificationCenterDelegate userNotificationCenter:center
+                                             didReceiveNotificationResponse:response
+                                                      withCompletionHandler:completionHandler];
+            }
+        return;
   }
 
   NSInteger notificationId =
